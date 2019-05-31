@@ -41,6 +41,9 @@ public void OnPluginStart()
 	
 	cvfRotateSpeed = CreateConVar("sm_tf2sb_sca_rotatespeed", "4.00", "(1.00 - 10.00) Security Camera rotate speed", 0, true, 1.00, true, 10.00);
 	cvfMaxTraceClient = CreateConVar("sm_tf2sb_sca_maxtrace", "300.0", "(100.0 - 1000.0) Security Camera max trace client distance", 0, true, 100.0, true, 1000.0);
+	
+	HookEvent("player_spawn", Event_PlayerSpawn);
+	HookEvent("player_death", Event_PlayerDeath);
 }
 
 public void OnMapStart()
@@ -63,6 +66,36 @@ public void OnEntityDestroyed(int entity)
 		{
 			RemoveCameraActivated(i, entity);
 		}
+	}
+}
+
+public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = GetClientOfUserId(event.GetInt("userid"));
+
+	if(client > 0 && client <= MaxClients && IsClientInGame(client))
+	{
+		if (g_bInConsole[client])
+		{
+			SetClientViewEntity(client, client);
+		}
+		
+		g_bInConsole[client] = false;
+	}
+}
+
+public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = GetClientOfUserId(event.GetInt("userid"));
+
+	if(client > 0 && client <= MaxClients && IsClientInGame(client))
+	{
+		if (g_bInConsole[client])
+		{
+			SetClientViewEntity(client, client);
+		}
+		
+		g_bInConsole[client] = false;
 	}
 }
 
@@ -94,10 +127,16 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 						
 						g_bInConsole[client] = !g_bInConsole[client];
 					}
+					else if (g_bInConsole[client])
+					{
+						g_bInConsole[client] = false;
+						SetClientViewEntity(client, client);
+					}
 				}
 				else if (g_bInConsole[client])
 				{
 					g_bInConsole[client] = false;
+					SetClientViewEntity(client, client);
 				}
 				
 				if (g_bInConsole[client])
@@ -113,7 +152,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 						{
 							SetClientViewEntity(client, point);
 							
-							PrintCenterText(client, "%N's Security Carema: %i", owner, g_iInConsoleNum[client]+1);
+							PrintCenterText(client, "%N's Security Camera: %i", owner, g_iInConsoleNum[client]+1);
 						}
 						else
 						{
@@ -139,6 +178,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 			else if (g_bInConsole[client])
 			{
 				g_bInConsole[client] = false;
+				SetClientViewEntity(client, client);
 			}
 		}
 	}
@@ -149,6 +189,8 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	
 	if (g_bInConsole[client])
 	{	
+		TF2_RemoveCondition(client, TFCond_Zoomed);
+		
 		if (buttons & IN_ATTACK)
 		{
 			if (!g_bIN_ATTACK[client])
@@ -167,7 +209,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 					{
 						SetClientViewEntity(client, point);
 						
-						PrintCenterText(client, "%N's Security Carema: %i", owner, g_iInConsoleNum[client]+1);
+						PrintCenterText(client, "%N's Security Camera: %i", owner, g_iInConsoleNum[client]+1);
 					}
 					else
 					{
@@ -209,7 +251,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 					{
 						SetClientViewEntity(client, point);
 						
-						PrintCenterText(client, "%N's Security Carema: %i", owner, g_iInConsoleNum[client]+1);
+						PrintCenterText(client, "%N's Security Camera: %i", owner, g_iInConsoleNum[client]+1);
 					}
 					else
 					{
