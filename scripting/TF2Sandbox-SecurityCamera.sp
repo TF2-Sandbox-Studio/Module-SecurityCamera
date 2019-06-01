@@ -3,7 +3,7 @@
 #define DEBUG
 
 #define PLUGIN_AUTHOR "BattlefieldDuck"
-#define PLUGIN_VERSION "1.1"
+#define PLUGIN_VERSION "1.2"
 
 #include <sourcemod>
 #include <sdktools>
@@ -508,8 +508,15 @@ public Action Timer_ActivateCamera(Handle timer, Handle dp)
 			float fbracketang[3];
 			GetEntPropVector(bracket, Prop_Data, "m_angRotation", fbracketang);
 			
-			if (fbracketang[1] - fcamang[1] > 45) rotateright = true;
-			else if (fbracketang[1] - fcamang[1] < -45) rotateright = false;
+			float angdiff = fbracketang[1] - fcamang[1];
+			if (angdiff > 45)
+			{
+				rotateright = true;
+			}
+			else if (angdiff < -45)
+			{
+				rotateright = false;
+			}
 		
 			float rotateangle;
 			rotateangle = (rotateright) ? cvfRotateSpeed.FloatValue : cvfRotateSpeed.FloatValue*-1;
@@ -636,10 +643,12 @@ bool CanSeeClient(int client, int camera)
 		int entity = TR_GetEntityIndex(trace);
 		if (entity > 0 && entity <= MaxClients)
 		{
+			CloseHandle(trace);
 			return true;
 		}
 	}
 	
+	CloseHandle(trace);
 	return false;
 }
 
