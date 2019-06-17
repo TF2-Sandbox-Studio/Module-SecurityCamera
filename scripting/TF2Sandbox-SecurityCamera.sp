@@ -1,9 +1,9 @@
- #pragma semicolon 1
+#pragma semicolon 1
 
 #define DEBUG
 
 #define PLUGIN_AUTHOR "BattlefieldDuck"
-#define PLUGIN_VERSION "1.2"
+#define PLUGIN_VERSION "1.3"
 
 #include <sourcemod>
 #include <sdktools>
@@ -211,6 +211,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 					{
 						SetClientViewEntity(client, point);
 						
+						camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][0]);
 						PrintCenterText(client, HUD_TEXT, owner, g_iInConsoleID[client]+1, GetCameraName(camera));
 					}
 					else
@@ -256,6 +257,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 					{
 						SetClientViewEntity(client, point);
 						
+						camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][0]);
 						PrintCenterText(client, HUD_TEXT, owner, g_iInConsoleID[client]+1, GetCameraName(camera));
 					}
 					else
@@ -644,11 +646,13 @@ bool CanSeeClient(int client, int camera)
 		if (entity > 0 && entity <= MaxClients)
 		{
 			CloseHandle(trace);
+			
 			return true;
 		}
 	}
 	
 	CloseHandle(trace);
+	
 	return false;
 }
 
@@ -736,6 +740,7 @@ bool IsCameraActivated(int client, int camera)
 			return true;
 		}
 	}
+	
 	return false;
 }
 
@@ -751,6 +756,7 @@ bool SetCameraActivated(int client, int camera, int point)
 			return true;
 		}
 	}
+	
 	return false;
 }
 
