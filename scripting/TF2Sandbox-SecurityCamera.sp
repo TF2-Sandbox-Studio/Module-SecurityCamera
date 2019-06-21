@@ -3,7 +3,7 @@
 #define DEBUG
 
 #define PLUGIN_AUTHOR "BattlefieldDuck"
-#define PLUGIN_VERSION "1.3"
+#define PLUGIN_VERSION "1.4"
 
 #include <sourcemod>
 #include <sdktools>
@@ -24,12 +24,16 @@ public Plugin myinfo =
 
 #define MAX_CAMERA 10
 #define CONTROL_CAMERA 100
+#define SOUND_SNAPSHOT "misc/tf_camera_07.wav"
 
 #define HIDEHUD_ALL ( 1<<2 )
 
 ConVar cvfRotateSpeed;
 ConVar cvfMaxTraceClient;
+ConVar cvbAutoSnapshot;
 
+#define ENTITY_CAMERA 0
+#define ENTITY_OPOINT 1
 int g_iCameraList[MAXPLAYERS + 1][MAX_CAMERA][2];
 
 bool g_bIN_SCORE[MAXPLAYERS + 1];
@@ -40,15 +44,21 @@ bool g_bIN_ATTACK3[MAXPLAYERS + 1];
 bool g_bInConsole[MAXPLAYERS + 1];
 int g_iInConsoleID[MAXPLAYERS + 1];
 int g_iConsoleOwnerRef[MAXPLAYERS + 1];
-MoveType g_mtClient[MAXPLAYERS + 1];
+int g_iClientWeaponRef[MAXPLAYERS + 1];
+
+float g_fCoolDown[MAXPLAYERS + 1];
 
 public void OnPluginStart()
 {
+	CreateConVar("sm_tf2sb_securitycamera_version", PLUGIN_VERSION, "", FCVAR_SPONLY|FCVAR_NOTIFY);
+	
 	RegAdminCmd("sm_cam", Command_SecurityCameraActivate, 0, "Activate the security camera");
 	RegAdminCmd("sm_camauto", Command_SecurityCameraActivateAuto, 0, "Activate the all the security camera");
+	RegAdminCmd("sm_camall", Command_SecurityCameraActivateAuto, 0, "Activate the all the security camera");
 	
-	cvfRotateSpeed = CreateConVar("sm_tf2sb_sca_rotatespeed", "4.00", "(1.00 - 10.00) Security Camera rotate speed", 0, true, 1.00, true, 10.00);
-	cvfMaxTraceClient = CreateConVar("sm_tf2sb_sca_maxtrace", "300.0", "(100.0 - 1000.0) Security Camera max trace client distance", 0, true, 100.0, true, 1000.0);
+	cvfRotateSpeed = CreateConVar("sm_tf2sb_cam_rotatespeed", "4.00", "(1.00 - 10.00) Security Camera rotate speed", 0, true, 1.00, true, 10.00);
+	cvfMaxTraceClient = CreateConVar("sm_tf2sb_cam_maxtrace", "300.0", "(100.0 - 1000.0) Security Camera max trace client distance", 0, true, 100.0, true, 1000.0);
+	cvbAutoSnapshot = CreateConVar("sm_tf2sb_cam_autosnapshot", "0", "(0 or 1) Security Camera automatic snapshot", 0, true, 0.0, true, 1.0);
 	
 	HookEvent("player_spawn", Event_PlayerSpawn);
 	HookEvent("player_death", Event_PlayerDeath);
@@ -56,6 +66,8 @@ public void OnPluginStart()
 
 public void OnMapStart()
 {
+	PrecacheSound(SOUND_SNAPSHOT);
+	
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if(IsClientInGame(i))
@@ -69,9 +81,11 @@ public void OnClientPutInServer(int client)
 {
 	for (int i = 0; i < MAX_CAMERA; i++)
 	{
-		g_iCameraList[client][i][0] = INVALID_ENT_REFERENCE;
-		g_iCameraList[client][i][1] = INVALID_ENT_REFERENCE;
+		g_iCameraList[client][i][ENTITY_CAMERA] = INVALID_ENT_REFERENCE;
+		g_iCameraList[client][i][ENTITY_OPOINT] = INVALID_ENT_REFERENCE;
 	}
+	
+	g_fCoolDown[client] = 0.0;
 	
 	SDKHook(client, SDKHook_PreThink, OnPreThink);
 }
@@ -83,7 +97,7 @@ public void OnPreThink(int client)
 		return;
 	}
 	
-	//Block attack1 nad attack2
+	//Block attack1 nad attack2 while in camera
 	int iWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
 	if(IsValidEntity(iWeapon))
 	{
@@ -118,7 +132,7 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 	}
 }
 
-#define HUD_TEXT "%N's Security Camera\nID: %i  Name: %s\n \n[MOUSE1]: Next  [MOUSE2]: Back  [TAB]: Quit"
+#define HUD_TEXT "%N's Security Camera\nID: %i  Name: %s\n \n[MOUSE1]: Next  [MOUSE2]: Back\n[MOUSE3]: Snapshot  [TAB]: Quit"
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
 {
 	int console = GetClientAimConsole(client);
@@ -155,24 +169,29 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 				{
 					g_bInConsole[client] = true;
 					
-					int aweapon = GetPlayerWeaponSlot(client, 2);
-					if (IsValidEntity(aweapon))
+					//Save current holding weapon and set current weapon to -1
+					int clientweapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+					
+					if (IsValidEntity(clientweapon))
 					{
-						SetEntPropEnt(client, Prop_Send, "m_hActiveWeapon", aweapon);
+						g_iClientWeaponRef[client] = EntIndexToEntRef(clientweapon);
 					}
 					
-					g_mtClient[client] = GetEntityMoveType(client);
+					SetEntPropEnt(client, Prop_Send, "m_hActiveWeapon", -1);
+					
+					//Hide HUD
 					SetEntProp(client, Prop_Send, "m_iHideHUD", GetEntProp(client, Prop_Send, "m_iHideHUD") | HIDEHUD_ALL);
-					SetEntityMoveType(client, MOVETYPE_OBSERVER);
+					
+					//Remove fisheye
 					TF2_RemoveCondition(client, TFCond_Zoomed);
 					
 					g_iInConsoleID[client] = GetNextCameraID(owner, 0);
-					int point = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][1]);
+					int point = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_OPOINT]);
 					if (point != INVALID_ENT_REFERENCE)
 					{
 						SetClientViewEntity(client, point);
 						
-						int camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][0]);
+						int camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_CAMERA]);
 						PrintCenterText(client, HUD_TEXT, owner, g_iInConsoleID[client]+1, GetCameraName(camera));
 					}
 				}
@@ -186,6 +205,9 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	
 	if (g_bInConsole[client])
 	{
+		//Fix client pos and angle
+		SetEntityFlags(client, (GetEntityFlags(client) | FL_FROZEN));
+		
 		//Switch to next camera
 		if (buttons & IN_ATTACK)
 		{
@@ -193,12 +215,12 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 			{
 				g_bIN_ATTACK[client] = true;
 				
-				if (g_iInConsoleID[client] > 9) g_iInConsoleID[client] = 0;
+				if (g_iInConsoleID[client] > MAX_CAMERA-1) g_iInConsoleID[client] = 0;
 				
 				int owner = GetClientOfUserId(g_iConsoleOwnerRef[client]);
 				if (owner != 0)
 				{
-					int camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][0]);
+					int camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_CAMERA]);
 					if (camera != INVALID_ENT_REFERENCE)
 					{
 						SetEntProp(camera, Prop_Send, "m_nSkin", 1);
@@ -206,12 +228,12 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 					
 					g_iInConsoleID[client] = GetNextCameraID(owner, g_iInConsoleID[client]);
 					
-					int point = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][1]);
+					int point = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_OPOINT]);
 					if (point != INVALID_ENT_REFERENCE)
 					{
 						SetClientViewEntity(client, point);
 						
-						camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][0]);
+						camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_CAMERA]);
 						PrintCenterText(client, HUD_TEXT, owner, g_iInConsoleID[client]+1, GetCameraName(camera));
 					}
 					else
@@ -239,12 +261,12 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 			{
 				g_bIN_ATTACK2[client] = true;
 					
-				if (g_iInConsoleID[client] < 0) g_iInConsoleID[client] = 9;
+				if (g_iInConsoleID[client] < 0) g_iInConsoleID[client] = MAX_CAMERA-1;
 				
 				int owner = GetClientOfUserId(g_iConsoleOwnerRef[client]);
 				if (owner != 0)
 				{
-					int camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][0]);
+					int camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_CAMERA]);
 					if (camera != INVALID_ENT_REFERENCE)
 					{
 						SetEntProp(camera, Prop_Send, "m_nSkin", 1);
@@ -252,12 +274,12 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 					
 					g_iInConsoleID[client] = GetBackCameraID(owner, g_iInConsoleID[client]);
 					
-					int point = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][1]);
+					int point = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_OPOINT]);
 					if (point != INVALID_ENT_REFERENCE)
 					{
 						SetClientViewEntity(client, point);
 						
-						camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][0]);
+						camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_CAMERA]);
 						PrintCenterText(client, HUD_TEXT, owner, g_iInConsoleID[client]+1, GetCameraName(camera));
 					}
 					else
@@ -278,13 +300,58 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 			g_bIN_ATTACK2[client] = false;
 		}
 		
+		//Take a snapshot
 		if (buttons & IN_ATTACK3)
 		{
 			if (!g_bIN_ATTACK3[client])
 			{
 				g_bIN_ATTACK3[client] = true;
 				
-				//Reserved
+				int owner = GetClientOfUserId(g_iConsoleOwnerRef[client]);
+				if (owner == client)
+				{
+					int camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_CAMERA]);
+					int point = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_OPOINT]);
+					if (camera != INVALID_ENT_REFERENCE && point != INVALID_ENT_REFERENCE)
+					{
+						if (g_fCoolDown[client] <= GetGameTime())
+						{
+							g_fCoolDown[client] = GetGameTime() + 1.0;
+							
+							float fcamerapos[3];
+							GetEntPropVector(camera, Prop_Send, "m_vecOrigin", fcamerapos);
+							
+							int[] clients = new int[MaxClients + 1];
+							clients[0] = client;
+							
+							int clientcount = 1;
+							for (int i = 1; i <= MaxClients; i++)
+							{
+								if (!IsClientInGame(i) || i == client)
+								{
+									continue;
+								}
+								
+								if (!CanSeeClient(i, camera))
+								{
+									continue;
+								}
+								
+								float fclientpos[3];
+								GetEntPropVector(i, Prop_Send, "m_vecOrigin", fclientpos);
+									
+								if (GetVectorDistance(fcamerapos, fclientpos) <= 500.0)
+								{
+									clients[clientcount] = i;
+									
+									clientcount++;
+								}
+							}
+							
+							CreateSnapShot(camera, point, clients, clientcount);
+						}
+					}
+				}
 			}
 		}
 		else
@@ -295,7 +362,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		int owner = GetClientOfUserId(g_iConsoleOwnerRef[client]);
 		if (owner != 0)
 		{
-			int camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][0]);
+			int camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_CAMERA]);
 			if (camera != INVALID_ENT_REFERENCE)
 			{
 				if (owner == client)
@@ -305,8 +372,8 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 					float fcamang[3];
 					GetEntPropVector(camera, Prop_Data, "m_angRotation", fcamang);
 					
-					fcamang[1] -= mouse[0]/20.0;
-					fcamang[2] -= mouse[1]/20.0;
+					fcamang[1] -= float(mouse[0]) / 20.0;
+					fcamang[2] -= float(mouse[1]) / 20.0;
 					
 					if (buttons & IN_FORWARD)
 					{
@@ -393,6 +460,7 @@ public Action Command_SecurityCameraActivate(int client, int args)
 	CreateDataTimer(0.0, Timer_ActivateCamera, dp);
 	WritePackCell(dp, EntIndexToEntRef(camera));
 	WritePackCell(dp, EntIndexToEntRef(bracket));
+	WritePackCell(dp, -1);
 	WritePackCell(dp, false);
 	
 	return Plugin_Continue;
@@ -448,6 +516,7 @@ public Action Command_SecurityCameraActivateAuto(int client, int args)
 		CreateDataTimer(0.0, Timer_ActivateCamera, dp);
 		WritePackCell(dp, EntIndexToEntRef(camera));
 		WritePackCell(dp, EntIndexToEntRef(bracket));
+		WritePackCell(dp, -1);
 		WritePackCell(dp, false);
 		
 		camera_count++;
@@ -463,6 +532,13 @@ public Action Timer_ActivateCamera(Handle timer, Handle dp)
 	ResetPack(dp);
 	int camera = EntRefToEntIndex(ReadPackCell(dp));
 	int bracket = EntRefToEntIndex(ReadPackCell(dp));
+	
+	int aimclient = ReadPackCell(dp);
+	if (aimclient != -1)
+	{
+		aimclient = GetClientOfUserId(aimclient);
+	}
+	
 	bool rotateright = ReadPackCell(dp);
 	
 	if (camera == INVALID_ENT_REFERENCE || bracket == INVALID_ENT_REFERENCE)
@@ -474,7 +550,8 @@ public Action Timer_ActivateCamera(Handle timer, Handle dp)
 	GetEntPropVector(camera, Prop_Send, "m_vecOrigin", fcamerapos);
 	GetEntPropVector(bracket, Prop_Send, "m_vecOrigin", fbracketpos);
 	
-	if (fcamerapos[0] != fbracketpos[0] && fcamerapos[1] != fbracketpos[1] && fcamerapos[2] != fbracketpos[2])
+	//Deactivate when carema or bracket position were not the same
+	if (fcamerapos[0] != fbracketpos[0] || fcamerapos[1] != fbracketpos[1] || fcamerapos[2] != fbracketpos[2])
 	{
 		RemoveCameraActivated(camera);
 
@@ -486,7 +563,7 @@ public Action Timer_ActivateCamera(Handle timer, Handle dp)
 	if (iMode != CONTROL_CAMERA)
 	{
 		if (client != -1)
-		{
+		{	
 			float fclientpos[3];
 			GetClientEyePosition(client, fclientpos);
 			
@@ -501,9 +578,25 @@ public Action Timer_ActivateCamera(Handle timer, Handle dp)
 			faimangle[0] = 0.0;
 			
 			DispatchKeyValueVector(camera, "angles", faimangle);
+			
+			if (aimclient != client && cvbAutoSnapshot.BoolValue)
+			{
+				aimclient = client;
+				
+				int clients[2];
+				clients[0] = client;
+				
+				int point = GetCameraObserverPoint(camera);
+				if (point != INVALID_ENT_REFERENCE)
+				{
+					CreateSnapShot(camera, point, clients, 1);
+				}
+			}
 		}
 		else
 		{
+			//aimclient = -1;
+			
 			float fcamang[3];
 			GetEntPropVector(camera, Prop_Data, "m_angRotation", fcamang);
 			
@@ -511,11 +604,11 @@ public Action Timer_ActivateCamera(Handle timer, Handle dp)
 			GetEntPropVector(bracket, Prop_Data, "m_angRotation", fbracketang);
 			
 			float angdiff = fbracketang[1] - fcamang[1];
-			if (angdiff > 45)
+			if (angdiff > 45.0)
 			{
 				rotateright = true;
 			}
-			else if (angdiff < -45)
+			else if (angdiff < -45.0)
 			{
 				rotateright = false;
 			}
@@ -532,6 +625,16 @@ public Action Timer_ActivateCamera(Handle timer, Handle dp)
 	CreateDataTimer(0.1, Timer_ActivateCamera, dp);
 	WritePackCell(dp, EntIndexToEntRef(camera));
 	WritePackCell(dp, EntIndexToEntRef(bracket));
+	
+	if (aimclient > 0 && aimclient <= MaxClients && IsClientInGame(aimclient))
+	{
+		WritePackCell(dp, GetClientUserId(aimclient));
+	}
+	else
+	{
+		WritePackCell(dp, -1);
+	}
+	
 	WritePackCell(dp, rotateright);
 	
 	return Plugin_Continue;
@@ -587,7 +690,7 @@ int GetClosestClient(int camera)
 		if (IsClientInGame(i) && IsPlayerAlive(i))
 		{
 			float fclientpos[3];
-			GetClientEyePosition(i, fclientpos);
+			GetEntPropVector(i, Prop_Send, "m_vecOrigin", fclientpos);
 			
 			float distance = GetVectorDistance(fcampos, fclientpos);
 			if (distance < shortestdistance)
@@ -619,7 +722,7 @@ int GetClientAimConsole(int client)
 			//Get the disance between client and console
 			float fconpos[3], fclientpos[3];
 			GetEntPropVector(console, Prop_Send, "m_vecOrigin", fconpos);
-			GetClientEyePosition(client, fclientpos);
+			GetEntPropVector(client, Prop_Send, "m_vecOrigin", fclientpos);
 			
 			if (GetVectorDistance(fconpos, fclientpos) < 150.0)
 			{
@@ -637,9 +740,10 @@ bool CanSeeClient(int client, int camera)
 	GetEntPropVector(camera, Prop_Send, "m_vecOrigin", fcampos);
 	
 	float fclientpos[3];
-	GetClientEyePosition(client, fclientpos);
+	GetEntPropVector(client, Prop_Send, "m_vecOrigin", fclientpos);
+	fclientpos[2] += 50.0;
 	
-	Handle trace = TR_TraceRayFilterEx(fcampos, fclientpos, MASK_SHOT, RayType_EndPoint, TraceEntityFilter, client);
+	Handle trace = TR_TraceRayFilterEx(fcampos, fclientpos, MASK_SHOT, RayType_EndPoint, TraceEntityFilter, camera);
 	if (TR_DidHit(trace))
 	{
 		int entity = TR_GetEntityIndex(trace);
@@ -665,12 +769,7 @@ float[] GetPointAimPosition(float pos[3], float angles[3], float maxtracedistanc
 		float endpos[3];
 		TR_GetEndPosition(endpos, trace);
 		
-		if((GetVectorDistance(pos, endpos) <= maxtracedistance) || maxtracedistance <= 0)
-		{
-			CloseHandle(trace);
-			return endpos;
-		}
-		else
+		if(!((GetVectorDistance(pos, endpos) <= maxtracedistance) || maxtracedistance <= 0))
 		{
 			float eyeanglevector[3];
 			GetAngleVectors(angles, eyeanglevector, NULL_VECTOR, NULL_VECTOR);
@@ -680,6 +779,9 @@ float[] GetPointAimPosition(float pos[3], float angles[3], float maxtracedistanc
 			CloseHandle(trace);
 			return endpos;
 		}
+		
+		CloseHandle(trace);
+		return endpos;
 	}
 	
 	CloseHandle(trace);
@@ -703,6 +805,22 @@ char[] GetCameraName(int camera)
 	return strName;
 }
 
+int GetCameraObserverPoint(int camera)
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		for (int j = 0; j < MAX_CAMERA; j++)
+		{
+			if (EntRefToEntIndex(g_iCameraList[i][j][ENTITY_CAMERA]) == camera)
+			{
+				return EntRefToEntIndex(g_iCameraList[i][j][ENTITY_OPOINT]);
+			}
+		}
+	}
+	
+	return -1;
+}
+
 bool IsSecurityCamera(int entity)
 {
 	char strModel[64];
@@ -721,7 +839,7 @@ int CreateObserverPoint(int camera)
 	fcamang[1] += 90.0;
 	fcamang[2] = 0.0;
 	DispatchKeyValueVector(point, "angles", fcamang);
-	DispatchKeyValueVector(point, "origin", GetPointAimPosition(fcampos, fcamang, 30.0, camera));
+	DispatchKeyValueVector(point, "origin", GetPointAimPosition(fcampos, fcamang, 25.0, camera));
 	
 	DispatchSpawn(point);
 	
@@ -731,11 +849,60 @@ int CreateObserverPoint(int camera)
 	return point;
 }
 
+void CreateSnapShot(int camera, int point, int[] clients, int clientcount)
+{
+	//Emit Camera Sound
+	EmitSoundToAll(SOUND_SNAPSHOT, camera);
+	
+	//Unstick
+	AcceptEntityInput(point, "ClearParent");
+	
+	float fpointpos[3], fpointang[3];
+	GetEntPropVector(point, Prop_Send, "m_vecOrigin", fpointpos);
+	GetEntPropVector(point, Prop_Data, "m_angRotation", fpointang);
+	
+	//Stick
+	SetVariantString("!activator");
+	AcceptEntityInput(point, "SetParent", camera);
+	
+	//Create flash light Splash
+	TE_SetupEnergySplash(fpointpos, fpointang, false);
+	TE_SendToAll();
+	
+	//Create flash light on clients' screen
+	int duration = 5;
+	int holdtime = 10;
+	int color[4] = { 255, 255, 255, 240 };
+
+	Handle message = StartMessageEx(GetUserMessageId("Fade"), clients, clientcount);
+	if (GetUserMessageType() == UM_Protobuf)
+	{
+		Protobuf pb = UserMessageToProtobuf(message);
+		pb.SetInt("duration", duration);
+		pb.SetInt("hold_time", holdtime);
+		pb.SetInt("flags", 0);
+		pb.SetColor("clr", color);
+	}
+	else
+	{
+		BfWrite bf = UserMessageToBfWrite(message);
+		bf.WriteShort(duration);
+		bf.WriteShort(holdtime);
+		bf.WriteShort(0);		
+		bf.WriteByte(color[0]);
+		bf.WriteByte(color[1]);
+		bf.WriteByte(color[2]);
+		bf.WriteByte(color[3]);
+	}
+	
+	EndMessage();
+}
+
 bool IsCameraActivated(int client, int camera)
 {
 	for (int i = 0; i < MAX_CAMERA; i++)
 	{
-		if (g_iCameraList[client][i][0] == EntIndexToEntRef(camera))
+		if (g_iCameraList[client][i][ENTITY_CAMERA] == EntIndexToEntRef(camera))
 		{
 			return true;
 		}
@@ -748,10 +915,10 @@ bool SetCameraActivated(int client, int camera, int point)
 {
 	for (int i = 0; i < MAX_CAMERA; i++)
 	{
-		if (EntRefToEntIndex(g_iCameraList[client][i][0]) == INVALID_ENT_REFERENCE)
+		if (EntRefToEntIndex(g_iCameraList[client][i][ENTITY_CAMERA]) == INVALID_ENT_REFERENCE)
 		{
-			g_iCameraList[client][i][0] = EntIndexToEntRef(camera);
-			g_iCameraList[client][i][1] = EntIndexToEntRef(point);
+			g_iCameraList[client][i][ENTITY_CAMERA] = EntIndexToEntRef(camera);
+			g_iCameraList[client][i][ENTITY_OPOINT] = EntIndexToEntRef(point);
 			
 			return true;
 		}
@@ -766,19 +933,17 @@ void RemoveCameraActivated(int camera)
 	{
 		for (int j = 0; j < MAX_CAMERA; j++)
 		{
-			if (EntRefToEntIndex(g_iCameraList[i][j][0]) == camera)
+			if (EntRefToEntIndex(g_iCameraList[i][j][ENTITY_CAMERA]) == camera)
 			{
-				g_iCameraList[i][j][0] = INVALID_ENT_REFERENCE;
+				g_iCameraList[i][j][ENTITY_CAMERA] = INVALID_ENT_REFERENCE;
 				
-				int point = EntRefToEntIndex(g_iCameraList[i][j][1]);
+				int point = EntRefToEntIndex(g_iCameraList[i][j][ENTITY_OPOINT]);
 				if (IsValidEntity(point))
 				{
 					AcceptEntityInput(point, "ClearParent");
 					AcceptEntityInput(point, "Kill");
 				}
-				
-				g_iCameraList[i][j][1] = INVALID_ENT_REFERENCE;
-				
+
 				return;
 			}
 		}
@@ -789,7 +954,7 @@ bool HasCamera(int client)
 {
 	for (int i = 0; i < MAX_CAMERA; i++)
 	{
-		if (EntRefToEntIndex(g_iCameraList[client][i][0]) != INVALID_ENT_REFERENCE)
+		if (EntRefToEntIndex(g_iCameraList[client][i][ENTITY_CAMERA]) != INVALID_ENT_REFERENCE)
 		{
 			return true;
 		}
@@ -804,9 +969,15 @@ void LeaveCamera(int client)
 	
 	SetClientViewEntity(client, client);
 	
-	if (GetEntityMoveType(client) == MOVETYPE_OBSERVER)
+	int weapon = EntRefToEntIndex(g_iClientWeaponRef[client]);
+	if (IsValidEntity(weapon))
 	{
-		SetEntityMoveType(client, g_mtClient[client]);
+		SetEntPropEnt(client, Prop_Send, "m_hActiveWeapon", weapon);
+	}
+	
+	if(GetEntityFlags(client) & FL_FROZEN)
+	{
+		SetEntityFlags(client, (GetEntityFlags(client) & ~FL_FROZEN));
 	}
 	
 	int iHideHUD = GetEntProp(client, Prop_Send, "m_iHideHUD");
@@ -815,7 +986,7 @@ void LeaveCamera(int client)
 	int owner = GetClientOfUserId(g_iConsoleOwnerRef[client]);
 	if (owner != 0)
 	{
-		int camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][0]);
+		int camera = EntRefToEntIndex(g_iCameraList[owner][g_iInConsoleID[client]][ENTITY_CAMERA]);
 		if (camera != INVALID_ENT_REFERENCE)
 		{
 			SetEntProp(camera, Prop_Send, "m_nSkin", 1);
@@ -827,7 +998,7 @@ int GetNextCameraID(int client, int id)
 {
 	for (int i = id+1; i < MAX_CAMERA; i++)
 	{
-		if (EntRefToEntIndex(g_iCameraList[client][i][0]) != INVALID_ENT_REFERENCE)
+		if (EntRefToEntIndex(g_iCameraList[client][i][ENTITY_CAMERA]) != INVALID_ENT_REFERENCE)
 		{
 			return i;
 		}
@@ -835,7 +1006,7 @@ int GetNextCameraID(int client, int id)
 	
 	for (int i = 0; i < id; i++)
 	{
-		if (EntRefToEntIndex(g_iCameraList[client][i][0]) != INVALID_ENT_REFERENCE)
+		if (EntRefToEntIndex(g_iCameraList[client][i][ENTITY_CAMERA]) != INVALID_ENT_REFERENCE)
 		{
 			return i;
 		}
@@ -848,7 +1019,7 @@ int GetBackCameraID(int client, int id)
 {
 	for (int i = id-1; i >= 0; i--)
 	{
-		if (EntRefToEntIndex(g_iCameraList[client][i][0]) != INVALID_ENT_REFERENCE)
+		if (EntRefToEntIndex(g_iCameraList[client][i][ENTITY_CAMERA]) != INVALID_ENT_REFERENCE)
 		{
 			return i;
 		}
@@ -856,7 +1027,7 @@ int GetBackCameraID(int client, int id)
 	
 	for (int i = MAX_CAMERA-1; i > id; i--)
 	{
-		if (EntRefToEntIndex(g_iCameraList[client][i][0]) != INVALID_ENT_REFERENCE)
+		if (EntRefToEntIndex(g_iCameraList[client][i][ENTITY_CAMERA]) != INVALID_ENT_REFERENCE)
 		{
 			return i;
 		}
